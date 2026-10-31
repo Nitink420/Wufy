@@ -1,9 +1,107 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  GoogleGenAI,
+  type Session,
+  type LiveServerMessage,
+} from '@google/genai';
 import { api, authHeaders } from './api';
-// A single failed control poll is usually a network flap, not a dead call.
-// Only treat the control connection as lost after this many consecutive
-// poll failures, mirroring the grace period #26 gives the peer connection.
+
+// Fail remote control connection only after consecutive poll failures
 const CONTROL_POLL_FAILURE_LIMIT = 3;
+
+function getAudioContextClass(): typeof AudioContext {
+  const AudioCtx =
+    (typeof window !== 'undefined'
+      ? window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext
+      : undefined) || globalThis.AudioContext;
+  if (!AudioCtx) {
+    throw new Error('Web Audio API is not supported in this environment.');
+  }
+  return AudioCtx;
+}
+
+/** Convert Float32Array audio data [-1.0, 1.0] to 16-bit linear PCM Int16Array */
+function floatTo16BitPCM(float32: Float32Array): Int16Array {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return int16;
+}
+
+/** Simple nearest-neighbor resampler for audio rate conversion */
+function resample(
+  source: Float32Array,
+  sourceRate: number,
+  targetRate: number,
+): Float32Array {
+  if (sourceRate === targetRate) return source;
+  const ratio = sourceRate / targetRate;
+  const newLength = Math.round(source.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const idx = Math.floor(i * ratio);
+    result[i] = source[idx];
+  }
+  return result;
+}
+
+/** Encode an ArrayBuffer / Uint8Array to base64 string */
+function arrayBufferToBase64(buffer: ArrayBufferLike): string {
+  const bytes = new Uint8Array(buffer as ArrayBuffer);
+  let binary = '';
+  const len = bytes.byteLength;
+  const chunkSize = 0x8000;
+  for (let i = 0; i < len; i += chunkSize) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, Math.min(i + chunkSize, len)) as unknown as number[],
+    );
+  }
+  return btoa(binary);
+}
+
+/** Decode Base64-encoded 16-bit linear PCM audio into Float32Array [-1.0, 1.0] */
+function base64ToFloat32Array(base64: string): Float32Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  const sampleCount = Math.floor(bytes.byteLength / 2);
+  const dataView = new DataView(
+    bytes.buffer,
+    bytes.byteOffset,
+    bytes.byteLength,
+  );
+  const float32 = new Float32Array(sampleCount);
+  for (let i = 0; i < sampleCount; i++) {
+    float32[i] = dataView.getInt16(i * 2, true) / 32768.0; // little-endian
+  }
+  return float32;
+}
+
+interface VoiceSession {
+  id?: string;
+  stream?: MediaStream;
+  inputCtx?: AudioContext;
+  processor?: ScriptProcessorNode;
+  outputCtx?: AudioContext;
+  gainNode?: GainNode;
+  activeSources: AudioBufferSourceNode[];
+  nextPlayTime: number;
+  liveSession?: Session;
+  transcript: string[];
+  currentAssistantText: string;
+  timer?: ReturnType<typeof setTimeout>;
+  controlPollFailures: number;
+  cancelled: boolean;
+}
+
 export function useVoice(
   threadId: string,
   onSaved: () => void,
@@ -24,61 +122,93 @@ export function useVoice(
   );
   const [caption, setCaption] = useState('');
   const [userCaption, setUserCaption] = useState('');
-  const session = useRef<
-    | {
-        pc: RTCPeerConnection;
-        stream: MediaStream;
-        audio: HTMLAudioElement;
-        id?: string;
-        channel: RTCDataChannel;
-        transcript: string[];
-        timer?: ReturnType<typeof setTimeout>;
-        controlPollFailures: number;
-        disconnectTimer?: ReturnType<typeof setTimeout>;
-        cancelled: boolean;
-      }
-    | undefined
-  >(undefined);
+
+  const mutedRef = useRef(false);
+  mutedRef.current = muted;
+
+  const speakerMutedRef = useRef(false);
+  speakerMutedRef.current = speakerMuted;
+
+  const session = useRef<VoiceSession | undefined>(undefined);
   const anchor = useRef(anchorMessageId);
   anchor.current = anchorMessageId;
+
+  const stopAllAudio = useCallback((voiceSession: VoiceSession) => {
+    for (const s of voiceSession.activeSources) {
+      try {
+        s.stop();
+        s.disconnect();
+      } catch {}
+    }
+    voiceSession.activeSources = [];
+    if (voiceSession.outputCtx) {
+      voiceSession.nextPlayTime = voiceSession.outputCtx.currentTime;
+    }
+  }, []);
+
   const closeMedia = useCallback(() => {
     const current = session.current;
     if (!current) return;
     current.cancelled = true;
-    current.stream.getTracks().forEach((track) => track.stop());
-    current.channel.close();
-    current.pc.close();
-    current.audio.pause();
-    current.audio.srcObject = null;
+
+    if (current.stream) {
+      current.stream.getTracks().forEach((track) => track.stop());
+    }
+    if (current.processor) {
+      try {
+        current.processor.disconnect();
+      } catch {}
+    }
+    if (current.inputCtx && current.inputCtx.state !== 'closed') {
+      try {
+        void current.inputCtx.close();
+      } catch {}
+    }
+    stopAllAudio(current);
+    if (current.outputCtx && current.outputCtx.state !== 'closed') {
+      try {
+        void current.outputCtx.close();
+      } catch {}
+    }
+    if (current.liveSession) {
+      try {
+        current.liveSession.close();
+      } catch {}
+    }
     clearTimeout(current.timer);
-    clearTimeout(current.disconnectTimer);
-  }, []);
+  }, [stopAllAudio]);
+
   const end = useCallback(async () => {
     if (ending.current) return;
     generation.current++;
     connecting.current = false;
+    ending.current = true;
+    setStatus('ending');
+
     const current = session.current;
     if (!current) {
+      ending.current = false;
       setStatus('idle');
       return;
     }
-    // Silence the call immediately, while keeping the peer alive until the
-    // provider confirms hangup through the server.
+
     current.cancelled = true;
-    current.stream.getTracks().forEach((track) => {
-      track.enabled = false;
-    });
-    current.audio.pause();
-    clearTimeout(current.timer);
-    clearTimeout(current.disconnectTimer);
-    ending.current = true;
-    setStatus('ending');
+    if (current.stream) {
+      current.stream.getTracks().forEach((track) => {
+        track.enabled = false;
+        track.stop();
+      });
+    }
+    stopAllAudio(current);
+
+    const callId = current.id;
     try {
-      if (current.id)
-        await api(`/voice/calls/${current.id}/end`, 'POST', {
+      if (callId) {
+        await api(`/voice/calls/${callId}/end`, 'POST', {
           transcript: current.transcript.join('\n').slice(0, 20000),
           anchorMessageId: anchor.current,
         });
+      }
       onSaved();
     } catch (e) {
       setError(
@@ -92,13 +222,15 @@ export function useVoice(
       ending.current = false;
       setStatus('idle');
     }
-  }, [closeMedia, onSaved]);
+  }, [closeMedia, onSaved, stopAllAudio]);
+
+  // Clean up on component unmount
   useEffect(
     () => () => {
       generation.current++;
       const current = session.current;
       closeMedia();
-      if (current?.id && !ending.current)
+      if (current?.id && !ending.current) {
         void fetch(`/api/voice/calls/${current.id}/end`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -108,15 +240,18 @@ export function useVoice(
           }),
           keepalive: true,
         }).catch(() => {});
+      }
     },
     [closeMedia],
   );
+
+  // Poll for remote call termination
   useEffect(() => {
     if (status !== 'active' && status !== 'connecting') return;
     const timer = setInterval(() => {
       const current = session.current;
       const id = current?.id;
-      if (id)
+      if (id) {
         void api<{ endedAt: number | null }>(`/voice/calls/${id}`)
           .then((call) => {
             if (session.current !== current) return;
@@ -134,9 +269,11 @@ export function useVoice(
             setError('Call control connection was lost.');
             void end();
           });
+      }
     }, 2000);
     return () => clearInterval(timer);
-  }, [status, closeMedia, onSaved, end]);
+  }, [status, end]);
+
   const start = async () => {
     if (session.current || connecting.current || ending.current) return;
     connecting.current = true;
@@ -144,176 +281,302 @@ export function useVoice(
     setStatus('connecting');
     setError('');
     setMuted(false);
+    mutedRef.current = false;
     setSpeakerMuted(false);
+    speakerMutedRef.current = false;
     setStartedAt(undefined);
     setPhase('listening');
     setCaption('');
     setUserCaption('');
+
     let stream: MediaStream | undefined;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 1. Microphone access
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
       if (attempt !== generation.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
-      const pc = new RTCPeerConnection();
-      const audio = new Audio();
-      audio.autoplay = true;
-      const channel = pc.createDataChannel('oai-events');
-      const current = {
-        pc,
-        audio,
-        stream,
-        channel,
-        transcript: [] as string[],
-        cancelled: false,
-        id: undefined as string | undefined,
-        timer: undefined as ReturnType<typeof setTimeout> | undefined,
-        controlPollFailures: 0,
-        disconnectTimer: undefined as ReturnType<typeof setTimeout> | undefined,
-      };
-      session.current = current;
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream!));
-      pc.ontrack = (event) => {
-        if (current.cancelled) return;
-        audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-        void audio.play().catch(() => {
-          if (!current.cancelled)
-            setError(
-              'Audio playback was blocked. Check your browser audio permissions.',
-            );
-        });
-      };
-      pc.onconnectionstatechange = () => {
-        if (current.cancelled) return;
-        if (pc.connectionState === 'connected') {
-          clearTimeout(current.disconnectTimer);
-          current.disconnectTimer = undefined;
-          setStatus('active');
-          setStartedAt((value) => value ?? Date.now());
-          if (current.id)
-            void api(`/voice/calls/${current.id}/active`, 'POST', {}).catch(
-              (e) => {
-                if (!current.cancelled) setError(e.message);
-              },
-            );
-        }
-        if (pc.connectionState === 'disconnected' && !current.disconnectTimer) {
-          current.disconnectTimer = setTimeout(() => {
-            current.disconnectTimer = undefined;
-            if (current.cancelled || pc.connectionState !== 'disconnected')
-              return;
-            setError('The voice connection dropped.');
-            void end();
-          }, 5000);
-        }
-        if (pc.connectionState === 'failed') {
-          setError('The voice connection dropped.');
-          void end();
-        }
-      };
-      channel.onmessage = async (event) => {
-        if (current.cancelled) return;
-        let data: Record<string, unknown>;
-        try {
-          const parsed: unknown = JSON.parse(String(event.data));
-          if (!parsed || typeof parsed !== 'object') return;
-          data = parsed as Record<string, unknown>;
-        } catch {
-          return;
-        }
-        if (data.type === 'input_audio_buffer.speech_started') {
-          setPhase('listening');
-          setCaption('');
-        }
-        if (
-          data.type === 'response.output_audio_transcript.delta' &&
-          typeof data.delta === 'string'
-        ) {
-          setPhase('speaking');
-          setCaption((text) => text + data.delta);
-        }
-        if (data.type === 'output_audio_buffer.stopped') setPhase('listening');
-        if (data.type === 'response.created') {
-          setCaption('');
-          setPhase('thinking');
-        }
-        if (typeof data.transcript === 'string') {
-          if (
-            data.type ===
-            'conversation.item.input_audio_transcription.completed'
-          ) {
-            current.transcript.push(`You: ${data.transcript}`);
-            setUserCaption(data.transcript);
-          }
-          if (data.type === 'response.output_audio_transcript.done')
-            current.transcript.push(`Woofy: ${data.transcript}`);
-        }
-        if (data.type === 'error')
-          setError(
-            'The voice provider reported a session error. End the call and retry.',
-          );
-        if (
-          data.type !== 'response.function_call_arguments.done' ||
-          data.name !== 'ask_compute' ||
-          typeof data.call_id !== 'string' ||
-          !current.id
-        )
-          return;
-        let output: string;
-        setPhase('thinking');
-        try {
-          const args: unknown = JSON.parse(String(data.arguments));
-          if (
-            !args ||
-            typeof args !== 'object' ||
-            !('request' in args) ||
-            typeof args.request !== 'string'
-          )
-            throw new Error('Invalid compute request.');
-          const result = await api<{ text: string }>(
-            `/voice/calls/${current.id}/compute`,
-            'POST',
-            {
-              toolCallId: data.call_id,
-              request: args.request,
-              transcript: current.transcript.join('\n').slice(-12000),
-            },
-          );
-          output = result.text;
-        } catch (e) {
-          output = `Compute failed: ${e instanceof Error ? e.message : 'Unknown error'}`;
-        }
-        if (!current.cancelled && channel.readyState === 'open') {
-          channel.send(
-            JSON.stringify({
-              type: 'conversation.item.create',
-              item: {
-                type: 'function_call_output',
-                call_id: data.call_id,
-                output,
-              },
-            }),
-          );
-          channel.send(JSON.stringify({ type: 'response.create' }));
-        }
-      };
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      const response = await api<{ id: string; sdp: string }>(
-        '/voice/calls',
-        'POST',
-        { threadId, sdp: offer.sdp },
-      );
-      current.id = response.id;
-      if (current.cancelled) {
-        await api(`/voice/calls/${response.id}/end`, 'POST', {
-          transcript: '',
-        });
+
+      // 2. Request new voice call from server to obtain Gemini Live ephemeral token
+      const callData = await api<{
+        id: string;
+        token: string;
+        model: string;
+      }>('/voice/calls', 'POST', { threadId });
+
+      if (attempt !== generation.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        void api(`/voice/calls/${callData.id}/end`, 'POST', { transcript: '' });
         return;
       }
-      await pc.setRemoteDescription({ type: 'answer', sdp: response.sdp });
-      if (current.cancelled) return;
+
+      // 3. Audio contexts
+      const AudioCtx = getAudioContextClass();
+      const inputCtx = new AudioCtx();
+      const outputCtx = new AudioCtx({ sampleRate: 24000 });
+
+      const gainNode = outputCtx.createGain();
+      gainNode.gain.value = speakerMutedRef.current ? 0 : 1;
+      gainNode.connect(outputCtx.destination);
+
+      const current: VoiceSession = {
+        id: callData.id,
+        stream,
+        inputCtx,
+        outputCtx,
+        gainNode,
+        activeSources: [],
+        nextPlayTime: outputCtx.currentTime,
+        transcript: [],
+        currentAssistantText: '',
+        controlPollFailures: 0,
+        cancelled: false,
+      };
+      session.current = current;
+
+      // 5. Connect to Google Gemini Live API using ephemeral token
+      const ai = new GoogleGenAI({
+        apiKey: callData.token,
+        httpOptions: { apiVersion: 'v1alpha' },
+      });
+
+      const handleLiveMessage = (e: LiveServerMessage) => {
+        if (current.cancelled) return;
+
+        // User spoke: interrupt assistant speech
+        if (e.serverContent?.interrupted) {
+          stopAllAudio(current);
+          setPhase('listening');
+        }
+
+        // Realtime interim user transcription
+        if (e.serverContent?.interimInputTranscription?.text) {
+          setUserCaption(e.serverContent.interimInputTranscription.text);
+          setPhase('listening');
+        }
+
+        // Final user speech transcription
+        if (e.serverContent?.inputTranscription?.text) {
+          const userText = e.serverContent.inputTranscription.text;
+          setUserCaption(userText);
+          current.transcript.push(`You: ${userText}`);
+        }
+
+        // Model output transcription delta
+        if (e.serverContent?.outputTranscription?.text) {
+          const text = e.serverContent.outputTranscription.text;
+          current.currentAssistantText += text;
+          setCaption(current.currentAssistantText);
+          setPhase('speaking');
+        }
+
+        // Audio parts generated by model
+        if (e.serverContent?.modelTurn?.parts) {
+          for (const part of e.serverContent.modelTurn.parts) {
+            if (part.text && !e.serverContent.outputTranscription?.text) {
+              current.currentAssistantText += part.text;
+              setCaption(current.currentAssistantText);
+            }
+            if (
+              part.inlineData?.data &&
+              part.inlineData.mimeType?.startsWith('audio/pcm')
+            ) {
+              setPhase('speaking');
+              const float32 = base64ToFloat32Array(part.inlineData.data);
+              let sampleRate = 24000;
+              const rateMatch = part.inlineData.mimeType.match(/rate=(\d+)/);
+              if (rateMatch) {
+                sampleRate = parseInt(rateMatch[1], 10);
+              }
+
+              if (
+                current.outputCtx &&
+                current.gainNode &&
+                float32.length > 0
+              ) {
+                const audioBuffer = current.outputCtx.createBuffer(
+                  1,
+                  float32.length,
+                  sampleRate,
+                );
+                audioBuffer.getChannelData(0).set(float32);
+
+                const source = current.outputCtx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(current.gainNode);
+
+                const now = current.outputCtx.currentTime;
+                const startTime = Math.max(now, current.nextPlayTime);
+                source.start(startTime);
+                current.nextPlayTime = startTime + audioBuffer.duration;
+
+                current.activeSources.push(source);
+                source.onended = () => {
+                  const idx = current.activeSources.indexOf(source);
+                  if (idx !== -1) current.activeSources.splice(idx, 1);
+                };
+              }
+            }
+          }
+        }
+
+        // Model turn complete
+        if (e.serverContent?.turnComplete) {
+          if (current.currentAssistantText.trim()) {
+            current.transcript.push(
+              `Woofy: ${current.currentAssistantText.trim()}`,
+            );
+            current.currentAssistantText = '';
+          }
+          setPhase('listening');
+        }
+
+        // Tool calls (ask_compute, open_chrome, open_notepad, open_vscode, take_screenshot, etc.)
+        if (e.toolCall?.functionCalls?.length) {
+          setPhase('thinking');
+          for (const call of e.toolCall.functionCalls) {
+            if (call.name && call.id && current.id) {
+              const callId = current.id;
+              const toolCallId = call.id;
+              const toolName = call.name;
+              const args = (call.args || {}) as Record<string, unknown>;
+
+              void (async () => {
+                let outputText: string;
+                try {
+                  if (toolName === 'ask_compute') {
+                    const requestText = (args.request as string) || '';
+                    const res = await api<{ text?: string; output?: string }>(
+                      `/voice/calls/${callId}/compute`,
+                      'POST',
+                      {
+                        toolCallId,
+                        request: requestText,
+                        transcript: current.transcript
+                          .join('\n')
+                          .slice(-12000),
+                      },
+                    );
+                    outputText = res.output ?? res.text ?? 'Done.';
+                  } else {
+                    const res = await api<{ text?: string; output?: string }>(
+                      `/voice/calls/${callId}/tool`,
+                      'POST',
+                      {
+                        toolCallId,
+                        name: toolName,
+                        args,
+                      },
+                    );
+                    outputText = res.output ?? res.text ?? 'Done.';
+                  }
+                } catch (err) {
+                  outputText = `Tool execution failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
+                }
+
+                if (current.liveSession && !current.cancelled) {
+                  try {
+                    current.liveSession.sendToolResponse({
+                      functionResponses: [
+                        {
+                          name: toolName,
+                          id: toolCallId,
+                          response: { output: outputText },
+                        },
+                      ],
+                    });
+                  } catch (sendErr) {
+                    console.error(
+                      'Failed to send tool response to Gemini Live:',
+                      sendErr,
+                    );
+                  }
+                }
+              })();
+            }
+          }
+        }
+      };
+
+      const liveSession = await ai.live.connect({
+        model: callData.model,
+        callbacks: {
+          onopen: () => {
+            if (current.cancelled) return;
+            setStatus('active');
+            setStartedAt((val) => val ?? Date.now());
+            if (current.id) {
+              void api(`/voice/calls/${current.id}/active`, 'POST', {}).catch(
+                (e) => {
+                  if (!current.cancelled) setError(e.message);
+                },
+              );
+            }
+          },
+          onmessage: (e: LiveServerMessage) => {
+            handleLiveMessage(e);
+          },
+          onerror: (e) => {
+            if (!current.cancelled) {
+              console.error('Gemini Live session error:', e);
+              setError('The voice session encountered an error.');
+            }
+          },
+          onclose: () => {
+            if (!current.cancelled && !ending.current) {
+              void end();
+            }
+          },
+        },
+      });
+
+      current.liveSession = liveSession;
+
+      // 6. Connect microphone audio processor to stream PCM chunks
+      const micSource = inputCtx.createMediaStreamSource(stream);
+      const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+
+      processor.onaudioprocess = (e) => {
+        if (
+          mutedRef.current ||
+          !current.liveSession ||
+          current.cancelled
+        )
+          return;
+
+        const inputData = e.inputBuffer.getChannelData(0);
+        const resampled = resample(inputData, inputCtx.sampleRate, 16000);
+        const pcm16 = floatTo16BitPCM(resampled);
+        const base64 = arrayBufferToBase64(pcm16.buffer);
+
+        try {
+          current.liveSession.sendRealtimeInput({
+            media: {
+              mimeType: 'audio/pcm;rate=16000',
+              data: base64,
+            },
+          });
+        } catch (err) {
+          console.error('Failed to stream audio chunk:', err);
+        }
+      };
+
+      micSource.connect(processor);
+      const silentGain = inputCtx.createGain();
+      silentGain.gain.value = 0;
+      processor.connect(silentGain);
+      silentGain.connect(inputCtx.destination);
+      current.processor = processor;
+
+      // 7. Max call duration timer (15 minutes)
       current.timer = setTimeout(() => void end(), 15 * 60_000);
     } catch (e) {
       if (attempt !== generation.current) {
@@ -322,32 +585,44 @@ export function useVoice(
       }
       const current = session.current;
       const id = current?.id;
-      if (id)
+      if (id) {
         void api(`/voice/calls/${id}/end`, 'POST', {
           transcript: '',
           anchorMessageId: anchor.current,
         }).catch(() => {});
+      }
       stream?.getTracks().forEach((track) => track.stop());
       closeMedia();
       session.current = undefined;
       setStatus('idle');
-      setError(e instanceof Error ? e.message : 'Could not connect the call.');
+      setError(
+        e instanceof Error ? e.message : 'Could not connect the call.',
+      );
     } finally {
       if (attempt === generation.current) connecting.current = false;
     }
   };
+
   const toggleMute = () => {
     const next = !muted;
-    session.current?.stream.getAudioTracks().forEach((track) => {
-      track.enabled = !next;
-    });
     setMuted(next);
+    mutedRef.current = next;
+    if (session.current?.stream) {
+      session.current.stream.getAudioTracks().forEach((track) => {
+        track.enabled = !next;
+      });
+    }
   };
+
   const toggleSpeaker = () => {
     const next = !speakerMuted;
-    if (session.current) session.current.audio.muted = next;
     setSpeakerMuted(next);
+    speakerMutedRef.current = next;
+    if (session.current?.gainNode) {
+      session.current.gainNode.gain.value = next ? 0 : 1;
+    }
   };
+
   return {
     status,
     error,

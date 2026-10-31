@@ -1,4 +1,8 @@
 import { createHmac } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
 import { z } from 'zod';
 import {
   computerInputs,
@@ -377,5 +381,138 @@ export class ComputerService {
         clearInterval(watcher);
       }
     });
+  }
+
+  async openApp(
+    name: 'chrome' | 'notepad' | 'vscode' | string,
+  ): Promise<{ success: boolean; message: string }> {
+    const isWin = process.platform === 'win32';
+    const app = name.toLowerCase().trim();
+
+    if (app.includes('chrome')) {
+      if (isWin) {
+        const localAppData = process.env.LOCALAPPDATA ?? '';
+        const chromePaths = [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+          path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
+        ];
+        const existing = chromePaths.find((p) => {
+          try {
+            return fs.existsSync(p);
+          } catch {
+            return false;
+          }
+        });
+        if (existing) {
+          spawn(existing, [], { detached: true, stdio: 'ignore' }).unref();
+          return { success: true, message: 'Google Chrome has been opened successfully.' };
+        }
+        spawn('cmd.exe', ['/c', 'start', '', 'chrome'], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref();
+        return { success: true, message: 'Google Chrome launched.' };
+      }
+      spawn('google-chrome', [], { detached: true, stdio: 'ignore' }).unref();
+      return { success: true, message: 'Google Chrome launched.' };
+    }
+
+    if (app.includes('notepad')) {
+      if (isWin) {
+        spawn('notepad.exe', [], { detached: true, stdio: 'ignore' }).unref();
+        return { success: true, message: 'Notepad has been opened successfully.' };
+      }
+      return { success: false, message: 'Notepad is only available on Windows.' };
+    }
+
+    if (app.includes('vscode') || app.includes('code')) {
+      if (isWin) {
+        const localAppData = process.env.LOCALAPPDATA ?? '';
+        const codePaths = [
+          path.join(localAppData, 'Programs\\Microsoft VS Code\\Code.exe'),
+          'C:\\Program Files\\Microsoft VS Code\\Code.exe',
+          'C:\\Program Files (x86)\\Microsoft VS Code\\Code.exe',
+        ];
+        const existing = codePaths.find((p) => {
+          try {
+            return fs.existsSync(p);
+          } catch {
+            return false;
+          }
+        });
+        if (existing) {
+          spawn(existing, [], { detached: true, stdio: 'ignore' }).unref();
+          return {
+            success: true,
+            message: 'Visual Studio Code has been opened successfully.',
+          };
+        }
+        return {
+          success: false,
+          message:
+            'Visual Studio Code is not installed on this machine (Code.exe was not found).',
+        };
+      }
+      return {
+        success: false,
+        message: 'Visual Studio Code is not installed on this system.',
+      };
+    }
+
+    return {
+      success: false,
+      message: `Unsupported application: "${name}". Demo actions support Chrome, Notepad, and VS Code.`,
+    };
+  }
+
+  async takeScreenshot(): Promise<{
+    success: boolean;
+    message: string;
+    path?: string;
+  }> {
+    if (process.platform === 'win32') {
+      const tempPath = path.join(
+        os.tmpdir(),
+        `wufy_screenshot_${Date.now()}.png`,
+      );
+      const escapedPath = tempPath.replace(/\\/g, '\\\\');
+      const script = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $bmp.Save('${escapedPath}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose();`;
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            script,
+          ]);
+          child.on('close', (code) => {
+            if (code === 0 && fs.existsSync(tempPath)) {
+              resolve();
+            } else {
+              reject(new Error(`Screenshot process exited with code ${code}`));
+            }
+          });
+          child.on('error', reject);
+        });
+        return {
+          success: true,
+          message: `Screenshot captured successfully to ${tempPath}.`,
+          path: tempPath,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          message: `Failed to capture screenshot: ${(err as Error).message}`,
+        };
+      }
+    }
+    return {
+      success: false,
+      message: 'Screenshot capture is only supported on Windows in this build.',
+    };
   }
 }

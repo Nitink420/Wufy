@@ -56,8 +56,8 @@ const config: PlatformConfig = {
   computerSupervisorToken: process.env.COMPUTER_SUPERVISOR_TOKEN,
   computerToken: process.env.COMPUTER_TOKEN,
   computerNamespace: process.env.COMPUTER_NAMESPACE,
-  voiceKey: process.env.VOICE_API_KEY,
-  voiceModel: process.env.VOICE_MODEL,
+  voiceKey: process.env.GEMINI_API_KEY || process.env.VOICE_API_KEY,
+  voiceModel: process.env.GEMINI_LIVE_MODEL || process.env.VOICE_MODEL || 'gemini-3.8-live',
   voiceName: process.env.VOICE_NAME ?? 'marin',
   slackChannel: process.env.SLACK_CHANNEL_NAME,
   slackTeam: process.env.SLACK_TEAM_ID,
@@ -151,3 +151,4 @@ const shutdown = createShutdown({
 });
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+

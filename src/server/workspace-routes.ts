@@ -166,16 +166,15 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   );
   app.post('/voice/calls', async (c) => {
     const data = z
-      .object({ threadId: z.string(), sdp: z.string().max(100000) })
-      .strict()
+      .object({ threadId: z.string() })
       .safeParse(await c.req.json().catch(() => null));
     if (!data.success)
       return c.json(
-        { error: 'A conversation and audio SDP offer are required.' },
+        { error: 'A conversation is required.' },
         400,
       );
     return c.json(
-      await voice.begin(data.data.threadId, data.data.sdp, c.req.raw.signal),
+      await voice.begin(data.data.threadId, c.req.raw.signal),
       201,
     );
   });
@@ -185,6 +184,25 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.post('/voice/calls/:id/active', (c) =>
     c.json(voice.activate(c.req.param('id'))),
   );
+  app.post('/voice/calls/:id/tool', async (c) => {
+    const data = z
+      .object({
+        toolCallId: z.string().min(1).max(200),
+        name: z.string().min(1).max(200),
+        args: z.record(z.string(), z.unknown()).default({}),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success)
+      return c.json({ error: 'A valid tool call is required.' }, 400);
+    const output = await voice.executeTool(
+      c.req.param('id'),
+      data.data.toolCallId,
+      data.data.name,
+      data.data.args,
+    );
+    return c.json({ output, text: output });
+  });
   app.post('/voice/calls/:id/compute', async (c) => {
     const data = z
       .object({
@@ -199,13 +217,12 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         { error: 'A bounded compute request and tool call ID are required.' },
         400,
       );
-    return c.json({
-      text: await voice.compute(
-        c.req.param('id'),
-        data.data.toolCallId,
-        `${data.data.request}\n\nUntrusted current-call transcript for context:\n${data.data.transcript}`,
-      ),
-    });
+    const text = await voice.compute(
+      c.req.param('id'),
+      data.data.toolCallId,
+      `${data.data.request}\n\nUntrusted current-call transcript for context:\n${data.data.transcript}`,
+    );
+    return c.json({ text, output: text });
   });
   app.post('/voice/calls/:id/end', async (c) => {
     const data = z
@@ -249,3 +266,4 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   });
   return app;
 }
+

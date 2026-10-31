@@ -42,7 +42,7 @@ export interface AiConfig {
   apiKey?: string;
   baseUrl: string;
   model?: string;
-  provider: 'gemini' | 'nemotron' | 'openai';
+  provider: 'gemini' | 'nemotron' | 'openai' | 'gemma' | 'ollama';
 }
 
 export function resolveAiConfig(
@@ -50,7 +50,38 @@ export function resolveAiConfig(
 ): AiConfig {
   const provider = env.AI_PROVIDER?.trim().toLowerCase();
 
-  // 1. Explicit or auto-detected Google Gemini
+  // 1. Google Gemma (via Google AI Studio, OpenRouter, or local endpoint)
+  if (provider === 'gemma') {
+    const isOllama =
+      env.GEMMA_BASE_URL?.includes('11434') ||
+      env.GEMMA_BASE_URL?.includes('localhost');
+    return {
+      provider: 'gemma',
+      apiKey:
+        env.GEMMA_API_KEY?.trim() ||
+        env.GEMINI_API_KEY?.trim() ||
+        (isOllama ? 'ollama' : undefined),
+      baseUrl:
+        env.GEMMA_BASE_URL?.trim() ||
+        env.GEMINI_BASE_URL?.trim() ||
+        'https://generativelanguage.googleapis.com/v1beta/openai/',
+      model:
+        env.GEMMA_MODEL?.trim() ||
+        'gemma-2-9b-it',
+    };
+  }
+
+  // 2. Ollama Local Runner
+  if (provider === 'ollama') {
+    return {
+      provider: 'ollama',
+      apiKey: env.OLLAMA_API_KEY?.trim() || 'ollama',
+      baseUrl: env.OLLAMA_BASE_URL?.trim() || 'http://127.0.0.1:11434/v1',
+      model: env.OLLAMA_MODEL?.trim() || 'gemma2:2b',
+    };
+  }
+
+  // 3. Explicit or auto-detected Google Gemini
   if (
     provider === 'gemini' ||
     (!provider &&
