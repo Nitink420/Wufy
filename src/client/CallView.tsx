@@ -98,15 +98,23 @@ export function CallView({
         >
           {[
             {
+              label: '✉️ Send Mail',
+              prompt: 'Please open mail compose window to send an email.',
+            },
+            {
+              label: '📝 Write in Notepad',
+              prompt: 'Please open Notepad and write a note for Nitin.',
+            },
+            {
+              label: '▶️ YouTube',
+              prompt: 'Please search YouTube for top music hits.',
+            },
+            {
               label: '🌐 Open Chrome',
               prompt: 'Please open Google Chrome browser.',
             },
             {
-              label: '📝 Open Notepad',
-              prompt: 'Please open Notepad editor.',
-            },
-            {
-              label: '💻 Open VS Code',
+              label: '💻 VS Code',
               prompt: 'Please open Visual Studio Code.',
             },
             {

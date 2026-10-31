@@ -385,6 +385,7 @@ export class ComputerService {
 
   async openApp(
     name: 'chrome' | 'notepad' | 'vscode' | string,
+    args?: { text?: string; url?: string },
   ): Promise<{ success: boolean; message: string }> {
     const isWin = process.platform === 'win32';
     const app = name.toLowerCase().trim();
@@ -404,22 +405,38 @@ export class ComputerService {
             return false;
           }
         });
+        const chromeArgs = args?.url ? [args.url] : [];
         if (existing) {
-          spawn(existing, [], { detached: true, stdio: 'ignore' }).unref();
+          spawn(existing, chromeArgs, { detached: true, stdio: 'ignore' }).unref();
           return { success: true, message: 'Google Chrome has been opened successfully.' };
         }
-        spawn('cmd.exe', ['/c', 'start', '', 'chrome'], {
+        spawn('cmd.exe', ['/c', 'start', '', 'chrome', ...(args?.url ? [args.url] : [])], {
           detached: true,
           stdio: 'ignore',
         }).unref();
         return { success: true, message: 'Google Chrome launched.' };
       }
-      spawn('google-chrome', [], { detached: true, stdio: 'ignore' }).unref();
+      spawn('google-chrome', args?.url ? [args.url] : [], { detached: true, stdio: 'ignore' }).unref();
       return { success: true, message: 'Google Chrome launched.' };
     }
 
     if (app.includes('notepad')) {
       if (isWin) {
+        if (args?.text) {
+          const tempFile = path.join(
+            os.tmpdir(),
+            `woofy_note_${Date.now()}.txt`,
+          );
+          fs.writeFileSync(tempFile, args.text, 'utf8');
+          spawn('notepad.exe', [tempFile], {
+            detached: true,
+            stdio: 'ignore',
+          }).unref();
+          return {
+            success: true,
+            message: `Notepad opened with your note: "${args.text.slice(0, 50)}${args.text.length > 50 ? '...' : ''}"`,
+          };
+        }
         spawn('notepad.exe', [], { detached: true, stdio: 'ignore' }).unref();
         return { success: true, message: 'Notepad has been opened successfully.' };
       }
@@ -463,6 +480,41 @@ export class ComputerService {
     return {
       success: false,
       message: `Unsupported application: "${name}". Demo actions support Chrome, Notepad, and VS Code.`,
+    };
+  }
+
+  async openBrowser(url?: string): Promise<{ success: boolean; message: string }> {
+    const targetUrl = url?.trim() || 'https://www.google.com';
+    const isWin = process.platform === 'win32';
+    if (isWin) {
+      spawn('cmd.exe', ['/c', 'start', '', targetUrl], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+      return { success: true, message: `Opened browser at ${targetUrl}` };
+    }
+    spawn('xdg-open', [targetUrl], { detached: true, stdio: 'ignore' }).unref();
+    return { success: true, message: `Opened browser at ${targetUrl}` };
+  }
+
+  async searchYouTube(query: string): Promise<{ success: boolean; message: string }> {
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query.trim())}`;
+    return this.openBrowser(url);
+  }
+
+  async composeEmail(params: {
+    to?: string;
+    subject?: string;
+    body?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const to = params.to ? encodeURIComponent(params.to.trim()) : '';
+    const su = params.subject ? encodeURIComponent(params.subject.trim()) : '';
+    const body = params.body ? encodeURIComponent(params.body.trim()) : '';
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&tf=1${to ? `&to=${to}` : ''}${su ? `&su=${su}` : ''}${body ? `&body=${body}` : ''}`;
+    await this.openBrowser(gmailUrl);
+    return {
+      success: true,
+      message: `Opened Gmail compose window${params.to ? ` to ${params.to}` : ''} ready to send.`,
     };
   }
 

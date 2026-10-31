@@ -546,25 +546,6 @@ export function useVoice(
                 },
               );
             }
-
-            // Immediately trigger Woofy to speak greeting to the user
-            try {
-              liveSession.sendClientContent({
-                turns: [
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text: 'Hello Woofy! Please warmly greet me in one short natural sentence and ask how you can help me today.',
-                      },
-                    ],
-                  },
-                ],
-                turnComplete: true,
-              });
-            } catch (greetErr) {
-              console.warn('Initial greeting trigger error:', greetErr);
-            }
           },
           onmessage: (e: LiveServerMessage) => {
             handleLiveMessage(e);
@@ -594,6 +575,28 @@ export function useVoice(
       });
 
       current.liveSession = liveSession;
+
+      // Immediately trigger Woofy to speak greeting to the user
+      if (!current.cancelled) {
+        try {
+          console.log('[Woofy Live] Connection established, sending greeting prompt...');
+          liveSession.sendClientContent({
+            turns: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: 'Hello Woofy! Please warmly greet me out loud in one short sentence and let me know you are listening and ready to help.',
+                  },
+                ],
+              },
+            ],
+            turnComplete: true,
+          });
+        } catch (greetErr) {
+          console.error('[Woofy Live] Initial greeting trigger error:', greetErr);
+        }
+      }
 
       // 6. Connect microphone audio processor to stream PCM chunks
       const micSource = inputCtx.createMediaStreamSource(stream);
