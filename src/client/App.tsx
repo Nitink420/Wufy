@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Pause,
   PanelLeft,
+  Phone,
   Play,
   Plus,
   Search,
@@ -128,6 +129,7 @@ export function App() {
   const [capture, setCapture] = useState<Result>();
   const [prompt, setPrompt] = useState('');
   const [pendingPrompt, setPendingPrompt] = useState<string>();
+  const [autoVoice, setAutoVoice] = useState(false);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
@@ -623,7 +625,11 @@ export function App() {
                   thread={thread}
                   dot={dot}
                   initialPrompt={pendingPrompt}
-                  onConsumed={() => setPendingPrompt(undefined)}
+                  onConsumed={() => {
+                    setPendingPrompt(undefined);
+                    setAutoVoice(false);
+                  }}
+                  autoStartVoice={autoVoice}
                   voiceReady={workspace.setup.voice}
                   calls={workspace.calls.filter(
                     (call) => call.threadId === thread.id,
@@ -645,14 +651,47 @@ export function App() {
                     />
                     <h2>{dot.name}</h2>
                     <p>{dot.instructions}</p>
-                    <button
-                      className="text-button"
-                      onClick={() =>
-                        setDialog({ type: 'dot', dot, spaceId: dot.spaceId })
-                      }
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: '10px',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginTop: '12px',
+                        flexWrap: 'wrap',
+                      }}
                     >
-                      Edit specialist <MoreHorizontal size={14} />
-                    </button>
+                      <button
+                        className="text-button"
+                        onClick={() =>
+                          setDialog({ type: 'dot', dot, spaceId: dot.spaceId })
+                        }
+                      >
+                        Edit specialist <MoreHorizontal size={14} />
+                      </button>
+                      {workspace?.setup.voice && (
+                        <button
+                          className="primary-button"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '8px 16px',
+                            borderRadius: '20px',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            fontWeight: 500,
+                          }}
+                          disabled={!configured || state.settings.paused}
+                          onClick={async () => {
+                            setAutoVoice(true);
+                            await newConversation('Voice call');
+                          }}
+                        >
+                          <Phone size={15} /> Talk with {dot.name}
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {!configured && (
                     <div className="setup-card">
@@ -716,13 +755,38 @@ export function App() {
                         <MessageCircle size={14} />
                         Text and calls, one continuing conversation
                       </span>
-                      <button
-                        className="send-button"
-                        aria-label="Start conversation"
-                        disabled={!configured || busy || !prompt.trim()}
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}
                       >
-                        <ArrowUp size={19} />
-                      </button>
+                        {workspace?.setup.voice && (
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="Start voice call"
+                            aria-label="Start voice call"
+                            disabled={
+                              !configured || busy || state.settings.paused
+                            }
+                            onClick={async () => {
+                              setAutoVoice(true);
+                              await newConversation('Voice call');
+                            }}
+                          >
+                            <Phone size={18} />
+                          </button>
+                        )}
+                        <button
+                          className="send-button"
+                          aria-label="Start conversation"
+                          disabled={!configured || busy || !prompt.trim()}
+                        >
+                          <ArrowUp size={19} />
+                        </button>
+                      </div>
                     </div>
                   </form>
                   <div className="starter-suggestions">

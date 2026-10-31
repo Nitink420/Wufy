@@ -323,6 +323,17 @@ export function useVoice(
       const inputCtx = new AudioCtx();
       const outputCtx = new AudioCtx({ sampleRate: 24000 });
 
+      if (inputCtx.state === 'suspended') {
+        try {
+          await inputCtx.resume();
+        } catch {}
+      }
+      if (outputCtx.state === 'suspended') {
+        try {
+          await outputCtx.resume();
+        } catch {}
+      }
+
       const gainNode = outputCtx.createGain();
       gainNode.gain.value = speakerMutedRef.current ? 0 : 1;
       gainNode.connect(outputCtx.destination);
@@ -527,11 +538,21 @@ export function useVoice(
           onerror: (e) => {
             if (!current.cancelled) {
               console.error('Gemini Live session error:', e);
-              setError('The voice session encountered an error.');
+              setError(
+                e instanceof Error
+                  ? e.message
+                  : 'The voice session encountered an error.',
+              );
             }
           },
-          onclose: () => {
+          onclose: (e: any) => {
             if (!current.cancelled && !ending.current) {
+              console.warn('Gemini Live session closed:', e);
+              if (e && e.code && e.code !== 1000) {
+                setError(
+                  `Voice connection closed: ${e.reason || `Code ${e.code}`}`,
+                );
+              }
               void end();
             }
           },

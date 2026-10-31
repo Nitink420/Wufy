@@ -180,11 +180,6 @@ export class VoiceService {
           model,
           config: liveConfig,
         },
-        lockAdditionalFields: [
-          'systemInstruction',
-          'tools',
-          'responseModalities',
-        ],
       },
     });
 

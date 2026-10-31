@@ -49,6 +49,7 @@ export function Chat({
   onSaved,
   onSchedule,
   onComputer,
+  autoStartVoice,
 }: {
   thread: Conversation;
   dot: Dot;
@@ -60,6 +61,7 @@ export function Chat({
   onSaved: () => void;
   onSchedule: () => void;
   onComputer?: () => void;
+  autoStartVoice?: boolean;
 }) {
   const { agent, isReady } = useAgent({
     agentId: `chat-${thread.id}`,
@@ -147,6 +149,18 @@ export function Chat({
       active = false;
     };
   }, [agent, copilotkit, isReady]);
+
+  useEffect(() => {
+    if (
+      autoStartVoice &&
+      voiceReady &&
+      loaded &&
+      !paused &&
+      voice.status === 'idle'
+    ) {
+      void voice.start();
+    }
+  }, [autoStartVoice, voiceReady, loaded, paused, voice]);
   const send = async (text: string) => {
     if (!text.trim() || running || !loaded || !contextReady || paused) return;
     setError('');
