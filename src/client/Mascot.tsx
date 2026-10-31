@@ -13,7 +13,7 @@ export function Mascot({
   state = 'idle',
   small = false,
   identity,
-  name = 'Dot',
+  name = 'Woofy',
   decorative = false,
 }: {
   state?: string;

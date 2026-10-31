@@ -157,15 +157,18 @@ h3 {
   gap: 4px;
 }
 .profile-mascot {
-  width: 46px;
-  height: 50px;
+  width: 48px;
+  height: 48px;
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: visible;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .profile-mascot .mascot {
-  width: 59px;
-  height: 59px;
-  margin: -5px 0 0 -7px;
+  width: 48px;
+  height: 48px;
+  margin: 0;
 }
 .profile-label {
   border: 0;
@@ -439,13 +442,47 @@ h3 {
   height: 180px;
   overflow: visible;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.mascot > img.dot-body,
+.mascot > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.3s ease;
+  will-change: transform;
+  filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.08));
+}
+.mascot:hover .dot-body {
+  transform: scale(1.08) translateY(-5px);
+  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.15));
+  cursor: pointer;
 }
 .mascot.small {
   width: 54px;
   height: 54px;
 }
+.mascot.small > img.dot-body,
+.mascot.small > img {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.06));
+}
+.mascot.small:hover .dot-body {
+  transform: scale(1.12) translateY(-2px);
+}
+/* Idle floating movement — gentle lifelike breathing */
+.mascot:not(.working):not(.paused) .dot-body {
+  animation: woofy-float 3.6s ease-in-out infinite;
+}
+.mascot.small:not(.working):not(.paused) .dot-body {
+  animation: woofy-float-small 3s ease-in-out infinite;
+}
+/* Active / Working bouncy movement */
 .mascot.working .dot-body {
-  animation: bob 2s ease-in-out infinite;
+  animation: woofy-working 1.6s ease-in-out infinite;
 }
 .mascot.complete .dot-body {
   transform: rotate(-3deg);
@@ -454,9 +491,63 @@ h3 {
 .mascot.paused {
   filter: saturate(0.5);
 }
+.mascot.paused .dot-body {
+  animation: none;
+}
 .mascot.needs-input .dot-body {
-  transform: rotate(6deg);
+  animation: woofy-wiggle 1.8s ease-in-out infinite;
   transform-origin: center;
+}
+
+@keyframes woofy-float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(1.2deg);
+  }
+}
+
+@keyframes woofy-float-small {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes woofy-working {
+  0%, 100% {
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-8px) scale(1.04) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(1px) scale(0.98) rotate(0deg);
+  }
+  75% {
+    transform: translateY(-5px) scale(1.02) rotate(2deg);
+  }
+}
+
+@keyframes woofy-wiggle {
+  0%, 100% {
+    transform: rotate(0deg) scale(1);
+  }
+  20% {
+    transform: rotate(6deg) scale(1.03);
+  }
+  40% {
+    transform: rotate(-5deg) scale(1.03);
+  }
+  60% {
+    transform: rotate(4deg) scale(1.02);
+  }
+  80% {
+    transform: rotate(-2deg) scale(1);
+  }
 }
 .composer {
   background: white;
@@ -3527,8 +3618,11 @@ h3 {
   min-height: 42px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .mascot.working .dot-body {
-    animation: none;
+  .mascot .dot-body,
+  .mascot.working .dot-body,
+  .mascot:not(.working):not(.paused) .dot-body,
+  .mascot.small:not(.working):not(.paused) .dot-body {
+    animation: none !important;
   }
 }
 
