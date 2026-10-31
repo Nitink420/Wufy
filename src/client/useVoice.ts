@@ -289,6 +289,17 @@ export function useVoice(
     setCaption('');
     setUserCaption('');
 
+    // CRITICAL: Initialize AudioContexts SYNCHRONOUSLY within the user click gesture!
+    // If initialized after asynchronous await calls, browser autoplay policy suspends them,
+    // causing microphone audio capture to be completely silenced and speaker playback to fail!
+    const AudioCtx = getAudioContextClass();
+    const inputCtx = new AudioCtx();
+    const outputCtx = new AudioCtx();
+    try {
+      void inputCtx.resume();
+      void outputCtx.resume();
+    } catch {}
+
     let stream: MediaStream | undefined;
     try {
       // 1. Microphone access
@@ -302,6 +313,8 @@ export function useVoice(
 
       if (attempt !== generation.current) {
         stream.getTracks().forEach((track) => track.stop());
+        void inputCtx.close();
+        void outputCtx.close();
         return;
       }
 
@@ -314,15 +327,13 @@ export function useVoice(
 
       if (attempt !== generation.current) {
         stream.getTracks().forEach((track) => track.stop());
+        void inputCtx.close();
+        void outputCtx.close();
         void api(`/voice/calls/${callData.id}/end`, 'POST', { transcript: '' });
         return;
       }
 
-      // 3. Audio contexts
-      const AudioCtx = getAudioContextClass();
-      const inputCtx = new AudioCtx();
-      const outputCtx = new AudioCtx({ sampleRate: 24000 });
-
+      // 3. Audio contexts routing
       if (inputCtx.state === 'suspended') {
         try {
           await inputCtx.resume();
@@ -413,6 +424,10 @@ export function useVoice(
                 current.gainNode &&
                 float32.length > 0
               ) {
+                if (current.outputCtx.state === 'suspended') {
+                  void current.outputCtx.resume();
+                }
+
                 const audioBuffer = current.outputCtx.createBuffer(
                   1,
                   float32.length,
@@ -531,6 +546,25 @@ export function useVoice(
                 },
               );
             }
+
+            // Immediately trigger Woofy to speak greeting to the user
+            try {
+              liveSession.sendClientContent({
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: 'Hello Woofy! Please warmly greet me in one short natural sentence and ask how you can help me today.',
+                      },
+                    ],
+                  },
+                ],
+                turnComplete: true,
+              });
+            } catch (greetErr) {
+              console.warn('Initial greeting trigger error:', greetErr);
+            }
           },
           onmessage: (e: LiveServerMessage) => {
             handleLiveMessage(e);
@@ -644,6 +678,28 @@ export function useVoice(
     }
   };
 
+  const sendText = useCallback((text: string) => {
+    const current = session.current;
+    if (!current?.liveSession || current.cancelled || !text.trim()) return;
+    const clean = text.trim();
+    current.transcript.push(`You: ${clean}`);
+    setUserCaption(clean);
+    setPhase('thinking');
+    try {
+      current.liveSession.sendClientContent({
+        turns: [
+          {
+            role: 'user',
+            parts: [{ text: clean }],
+          },
+        ],
+        turnComplete: true,
+      });
+    } catch (err) {
+      console.error('Failed to send text to voice session:', err);
+    }
+  }, []);
+
   return {
     status,
     error,
@@ -657,5 +713,6 @@ export function useVoice(
     userCaption,
     toggleMute,
     toggleSpeaker,
+    sendText,
   };
 }

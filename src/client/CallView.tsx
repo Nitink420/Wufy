@@ -7,6 +7,7 @@ import {
   Volume2,
   VolumeX,
   Maximize2,
+  Send,
 } from 'lucide-react';
 import { Mascot } from './Mascot';
 import type { Dot } from '../shared/types';
@@ -20,6 +21,7 @@ export function CallView({
   voice: ReturnType<typeof useVoice>;
 }) {
   const [minimized, setMinimized] = useState(false);
+  const [inputText, setInputText] = useState('');
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (voice.status !== 'active') return;
@@ -81,6 +83,109 @@ export function CallView({
             {voice.caption || 'Speak naturally. Your Woofy is here with you.'}
           </p>
         </div>
+      )}
+      {!minimized && voice.status === 'active' && (
+        <div
+          className="call-quick-actions"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '8px',
+            justifyContent: 'center',
+            margin: '12px 0 6px',
+            maxWidth: '440px',
+          }}
+        >
+          {[
+            {
+              label: '🌐 Open Chrome',
+              prompt: 'Please open Google Chrome browser.',
+            },
+            {
+              label: '📝 Open Notepad',
+              prompt: 'Please open Notepad editor.',
+            },
+            {
+              label: '💻 Open VS Code',
+              prompt: 'Please open Visual Studio Code.',
+            },
+            {
+              label: '📸 Screenshot',
+              prompt: 'Please take a screenshot of my screen.',
+            },
+          ].map((act) => (
+            <button
+              key={act.label}
+              type="button"
+              style={{
+                background: 'rgba(255, 255, 255, 0.15)',
+                border: '1px solid rgba(255, 255, 255, 0.25)',
+                color: '#fff',
+                borderRadius: '16px',
+                padding: '6px 12px',
+                fontSize: '12px',
+                cursor: 'pointer',
+              }}
+              onClick={() => voice.sendText(act.prompt)}
+            >
+              {act.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {!minimized && voice.status === 'active' && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (inputText.trim()) {
+              voice.sendText(inputText.trim());
+              setInputText('');
+            }
+          }}
+          style={{
+            display: 'flex',
+            gap: '8px',
+            width: '100%',
+            maxWidth: '380px',
+            margin: '6px 0 14px',
+          }}
+        >
+          <input
+            type="text"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder="Type or speak to Woofy…"
+            style={{
+              flex: 1,
+              background: 'rgba(255, 255, 255, 0.12)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              color: '#fff',
+              borderRadius: '20px',
+              padding: '8px 16px',
+              fontSize: '13px',
+              outline: 'none',
+            }}
+          />
+          <button
+            type="submit"
+            disabled={!inputText.trim()}
+            style={{
+              background: '#abf1d5',
+              border: 'none',
+              color: '#133d37',
+              borderRadius: '50%',
+              width: '36px',
+              height: '36px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: inputText.trim() ? 'pointer' : 'default',
+              opacity: inputText.trim() ? 1 : 0.5,
+            }}
+          >
+            <Send size={16} />
+          </button>
+        </form>
       )}
       {voice.error && (
         <p className="call-warning" role="alert">
